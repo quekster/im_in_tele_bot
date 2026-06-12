@@ -16,6 +16,7 @@ from app.handlers import (
     edit_invite_handler,
     invite_button_handler,
     open_invite_handler,
+    remember_seen_user_handler,
     remove_user_handler,
     set_capacity_handler,
     set_tourneys_topic_handler,
@@ -29,6 +30,9 @@ def build_application(settings: Settings) -> Application:
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.bot_data["db"] = FirestoreDB(settings.google_cloud_project, settings.firestore_database)
     application.bot_data["setup_flows"] = {}
+
+    application.add_handler(MessageHandler(filters.ALL, remember_seen_user_handler), group=-1)
+    application.add_handler(CallbackQueryHandler(remember_seen_user_handler), group=-1)
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("settourneystopic", set_tourneys_topic_handler))

@@ -103,7 +103,7 @@ Reply to an invite message with:
 /endevent
 ```
 
-Manual add only works for users already known to that invite, because Telegram does not let bots reliably resolve arbitrary handles to numeric user IDs.
+Manual add works for users the bot already knows in that group. The bot learns users when they press invite buttons, use bot commands, or send messages that the bot can see. Telegram does not let bots list every group member or resolve arbitrary handles to numeric user IDs, so a completely unseen `@username` cannot be added until the bot has seen that user at least once.
 
 ## User Buttons
 

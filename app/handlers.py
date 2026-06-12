@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from telegram import Message, Update
+from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -53,6 +54,19 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message = update.effective_message
     if message:
         await message.reply_text("ImInBot is running. Admins can use /settourneystopic in TOURNEYS to begin.")
+
+
+async def remember_seen_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or not user.username:
+        return
+
+    try:
+        await _db(context).remember_user(chat.id, user.id, user.username, user.full_name)
+        logger.info("Remembered user %s in chat %s", user.id, chat.id)
+    except Exception:
+        logger.exception("Failed to remember known Telegram user")
 
 
 async def set_tourneys_topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -337,7 +351,22 @@ async def _manual_user_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if action == "remove":
         result = await db.remove_user_by_username(event["id"], username)
     else:
-        result = await db.add_known_user_by_username(event["id"], username)
+        known_user = await db.get_known_user_by_username(username, message.chat_id)
+        if not known_user:
+            await _send_topic_message(
+                context,
+                message,
+                "I do not know that user yet. Ask them to press an invite button or send a message in this group first.",
+            )
+            await delete_message_safely(context, message.chat_id, message.message_id)
+            return
+
+        if not await _is_current_group_member(context, message.chat_id, int(known_user["user_id"])):
+            await _send_topic_message(context, message, "That user is not currently in this group.")
+            await delete_message_safely(context, message.chat_id, message.message_id)
+            return
+
+        result = await db.add_user_to_event(event["id"], int(known_user["user_id"]), str(known_user["username"]))
 
     if result.get("ok"):
         await refresh_event_message(context, db, event["id"])
@@ -474,6 +503,15 @@ async def _delete_poster_message(context: ContextTypes.DEFAULT_TYPE, event: dict
     poster_message_id = event.get("poster_message_id")
     if poster_message_id:
         await delete_message_safely(context, event["chat_id"], int(poster_message_id))
+
+
+async def _is_current_group_member(context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+    except TelegramError:
+        logger.exception("Failed to validate adduser target membership")
+        return False
+    return member.status not in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED}
 
 
 async def _event_from_reply(update: Update, db: FirestoreDB) -> dict[str, Any] | None:

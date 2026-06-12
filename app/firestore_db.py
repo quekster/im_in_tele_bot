@@ -43,6 +43,36 @@ class FirestoreDB:
     def new_event_id(self) -> str:
         return self.client.collection("events").document().id
 
+    async def remember_user(self, chat_id: int, user_id: int, username: str, full_name: str | None = None) -> None:
+        await asyncio.to_thread(self._remember_user_sync, chat_id, user_id, username, full_name)
+
+    def _remember_user_sync(self, chat_id: int, user_id: int, username: str, full_name: str | None = None) -> None:
+        clean_username = username.lstrip("@")
+        self.client.collection("known_users").document(str(user_id)).set(
+            {
+                "user_id": user_id,
+                "username": clean_username,
+                "username_lower": clean_username.lower(),
+                "full_name": full_name,
+                "chat_ids": firestore.ArrayUnion([chat_id]),
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+
+    async def get_known_user_by_username(self, username: str, chat_id: int) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_known_user_by_username_sync, username, chat_id)
+
+    def _get_known_user_by_username_sync(self, username: str, chat_id: int) -> dict[str, Any] | None:
+        target = _normalize_username(username)
+        query = self.client.collection("known_users").where("username_lower", "==", target).limit(5)
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            if chat_id in data.get("chat_ids", []):
+                data["id"] = snap.id
+                return data
+        return None
+
     async def get_topic_settings(self) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._get_topic_settings_sync)
 
@@ -403,6 +433,43 @@ class FirestoreDB:
 
     async def add_known_user_by_username(self, event_id: str, username: str) -> dict[str, Any]:
         return await asyncio.to_thread(self._add_known_user_by_username_sync, event_id, username)
+
+    async def add_user_to_event(self, event_id: str, user_id: int, username: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._add_user_to_event_sync, event_id, user_id, username)
+
+    def _add_user_to_event_sync(self, event_id: str, user_id: int, username: str) -> dict[str, Any]:
+        event_ref = self.client.collection("events").document(event_id)
+        transaction = self.client.transaction()
+
+        @firestore.transactional
+        def txn(transaction: firestore.Transaction) -> dict[str, Any]:
+            event_snap = event_ref.get(transaction=transaction)
+            if not event_snap.exists or (event_snap.to_dict() or {}).get("is_deleted"):
+                return {"ok": False, "message": "Invite not found."}
+
+            event = event_snap.to_dict() or {}
+            signups = self._transaction_signups(event_ref, transaction)
+            existing = self._find_signup(signups, user_id)
+            if existing and existing.get("status") in ACTIVE_STATUSES:
+                return {"ok": False, "message": "User is already on this invite."}
+
+            in_list = _active_sorted(signups, "in")
+            status = "in" if len(in_list) < int(event.get("max_capacity", 0)) else "waitlist"
+            transaction.set(
+                event_ref.collection("signups").document(str(user_id)),
+                {
+                    "user_id": user_id,
+                    "username_at_signup": username.lstrip("@"),
+                    "status": status,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "updated_at": firestore.SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            transaction.update(event_ref, {"updated_at": firestore.SERVER_TIMESTAMP})
+            return {"ok": True, "changed": True}
+
+        return txn(transaction)
 
     def _add_known_user_by_username_sync(self, event_id: str, username: str) -> dict[str, Any]:
         event_ref = self.client.collection("events").document(event_id)
